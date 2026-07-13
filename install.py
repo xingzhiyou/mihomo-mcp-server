@@ -436,7 +436,14 @@ def step7_setup_mcp() -> bool:
     """Step 7: 确保 MCP 依赖就绪并启动."""
     step(7, TOTAL_STEPS, "启动 MCP 节点管理器")
 
-    # 检查依赖
+    # 检查 screen
+    info("检查依赖...")
+    r = run(["which", "screen"])
+    if r.returncode != 0:
+        fail("screen 未安装，请先安装: sudo apt install screen")
+        return False
+
+    # 检查 Python 依赖
     info("检查 Python 依赖...")
     r = run([sys.executable, "-c", "import yaml"], check=False)
     if r.returncode != 0:

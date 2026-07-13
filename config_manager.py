@@ -43,13 +43,8 @@ def write_config(cfg: dict) -> tuple[bool, str]:
 
 def restart_mihomo() -> tuple[bool, str]:
     """重启 Mihomo 并等待就绪。返回 (成功, 消息)。"""
-    try:
-        result = subprocess.run(
-            ["sudo", "systemctl", "restart", "mihomo"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            return False, f"重启失败: {result.stderr.strip()}"
+    result = run_systemctl("restart")
+    if result.get("success"):
         # 等待服务就绪
         for _ in range(10):
             time.sleep(0.5)
@@ -60,10 +55,8 @@ def restart_mihomo() -> tuple[bool, str]:
             if check.stdout.strip() == "active":
                 return True, "✅ Mihomo 已重启并就绪"
         return True, "⚠️ 重启命令已发出，但状态检查未返回 active"
-    except subprocess.TimeoutExpired:
-        return False, "重启超时（30s）"
-    except Exception as e:
-        return False, f"重启异常: {e}"
+    err = result.get("error", {})
+    return False, err.get("details", "重启失败") if err else "重启失败"
 
 
 def run_systemctl(action: str) -> dict:

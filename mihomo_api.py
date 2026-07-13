@@ -11,12 +11,37 @@ import urllib.error
 from config import MIHOMO_API, R
 
 
+def _load_secret() -> str | None:
+    """从 Mihomo 配置中读取 external-controller secret。"""
+    import os
+    try:
+        import yaml
+        config_path = os.environ.get(
+            "MIHOMO_CONFIG", "/etc/mihomo/config.yaml")
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        if not cfg:
+            return None
+        secret = cfg.get("secret")
+        return str(secret) if secret else None
+    except Exception:
+        return None
+
+
+_SECRET = _load_secret()
+
+
+def _headers() -> dict:
+    headers = {"User-Agent": "mcp-nodes/2.1"}
+    if _SECRET:
+        headers["Authorization"] = f"Bearer {_SECRET}"
+    return headers
+
+
 def _api_get(path: str, timeout: int = 10) -> dict:
     """GET 请求 Mihomo API，返回 JSON。"""
     url = f"{MIHOMO_API}{path}"
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "mcp-nodes/2.1"}
-    )
+    req = urllib.request.Request(url, headers=_headers())
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
@@ -25,9 +50,10 @@ def _api_put(path: str, data: dict, timeout: int = 10) -> bool:
     """PUT 请求 Mihomo API，返回是否成功。"""
     url = f"{MIHOMO_API}{path}"
     body = json.dumps(data).encode()
+    headers = _headers()
+    headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        url, data=body, method="PUT",
-        headers={"Content-Type": "application/json"}
+        url, data=body, method="PUT", headers=headers
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status == 204
@@ -73,13 +99,14 @@ def get_proxy_groups() -> dict | None:
 def switch_proxy_node(group: str, node: str) -> dict:
     """切换指定代理组的节点。"""
     encoded = urllib.parse.quote(group, safe="")
-    path = f"/groups/{encoded}"
+    path = f"/proxies/{encoded}"
+    # 先 GET 确认组存在
     raw = safe_api_get(path)
     if "_mcp_error" in raw:
         return raw["_mcp_error"]
 
     try:
-        _api_put(f"{path}/delay", {"name": node})
+        _api_put(path, {"name": node})
         return R.ok(message=f"节点已切换: {group} → {node}")
     except urllib.error.HTTPError as e:
         body = e.read()[:200].decode(errors="replace")
@@ -104,9 +131,10 @@ def test_node_delay(node: str, url: str = None,
     target_url = url or TEST_URL
     t = timeout or TEST_TIMEOUT
     params = urllib.parse.urlencode({
-        "name": node, "url": target_url, "timeout": str(t)
+        "url": target_url, "timeout": str(t)
     })
-    path = f"/group/{urllib.parse.quote(node, safe='')}/delay?{params}"
+    encoded = urllib.parse.quote(node, safe='')
+    path = f"/proxies/{encoded}/delay?{params}"
     raw = safe_api_get(path)
     if "_mcp_error" in raw:
         return {"_mcp_error": raw["_mcp_error"]}

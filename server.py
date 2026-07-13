@@ -3,13 +3,17 @@ MCP HTTP 服务器：路由分发、SSE 协议、工具注册。
 """
 
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any
 
-from config import R, MIHOMO_API
+from config import R
+
+MAX_BODY_SIZE = 1 * 1024 * 1024  # 1MB
 from tools_nodes import (
     tool_list_groups, tool_list_nodes, tool_switch_node,
     tool_test_delay, tool_test_connectivity, tool_batch_test,
+    tool_run_with_node,
 )
 from tools_subscriptions import (
     tool_list_subscriptions, tool_refresh_subscription,
@@ -20,6 +24,16 @@ from tools_versions import (
     tool_mihomo_status, tool_mihomo_start, tool_mihomo_stop,
     tool_mihomo_version, tool_mihomo_list_versions,
     tool_mihomo_upgrade, tool_mihomo_rollback,
+)
+from tools_rules import (
+    tool_list_rules, tool_add_rule, tool_remove_rule,
+    tool_add_direct_rule, tool_add_proxy_rule,
+)
+from tools_toolproxy import (
+    tool_toolproxy_status, tool_toolproxy_init,
+    tool_toolproxy_start, tool_toolproxy_stop,
+    tool_toolproxy_switch_node, tool_toolproxy_list_nodes,
+    tool_toolproxy_run_with_node,
 )
 
 # ─── 工具注册 ──────────────────────────────────────
@@ -85,6 +99,59 @@ MCP_TOOLS = {
             "target": {"type": "string",
                        "description": "测试目标URL", "required": False}
         }
+    },
+    "run_with_node": {
+        "name": "run_with_node",
+        "description": "（工具代理）在工具代理独立节点下执行命令，完全不影响系统代理。使用独立 Mihomo 实例（端口 7893）",
+        "handler": tool_toolproxy_run_with_node,
+        "parameters": {
+            "command": {"type": "string",
+                        "description": "要执行的命令", "required": True},
+            "node": {"type": "string",
+                     "description": "目标节点名称", "required": True},
+            "timeout": {"type": "number",
+                        "description": "超时时间（秒，默认 30）", "required": False}
+        }
+    },
+    # 工具代理管理 ──
+    "toolproxy_status": {
+        "name": "toolproxy_status",
+        "description": "查看工具代理（独立 Mihomo 实例）的运行状态",
+        "handler": tool_toolproxy_status,
+        "parameters": {}
+    },
+    "toolproxy_init": {
+        "name": "toolproxy_init",
+        "description": "初始化工具代理配置（从系统 Mihomo 复制订阅，创建独立配置）",
+        "handler": tool_toolproxy_init,
+        "parameters": {}
+    },
+    "toolproxy_start": {
+        "name": "toolproxy_start",
+        "description": "启动工具代理（独立 Mihomo 实例，端口 7893）",
+        "handler": tool_toolproxy_start,
+        "parameters": {}
+    },
+    "toolproxy_stop": {
+        "name": "toolproxy_stop",
+        "description": "停止工具代理",
+        "handler": tool_toolproxy_stop,
+        "parameters": {}
+    },
+    "toolproxy_switch_node": {
+        "name": "toolproxy_switch_node",
+        "description": "切换工具代理的节点（不影响系统代理）",
+        "handler": tool_toolproxy_switch_node,
+        "parameters": {
+            "node": {"type": "string",
+                     "description": "目标节点名称", "required": True}
+        }
+    },
+    "toolproxy_list_nodes": {
+        "name": "toolproxy_list_nodes",
+        "description": "列出工具代理中的可用节点",
+        "handler": tool_toolproxy_list_nodes,
+        "parameters": {}
     },
     # 订阅管理 ──
     "list_subscriptions": {
@@ -205,6 +272,108 @@ MCP_TOOLS = {
         "handler": tool_mihomo_rollback,
         "parameters": {}
     },
+    # 规则管理 ──
+    "list_rules": {
+        "name": "list_rules",
+        "description": "列出当前所有路由规则，可按关键词筛选",
+        "handler": tool_list_rules,
+        "parameters": {
+            "filter": {"type": "string",
+                       "description": "关键词筛选（可选）",
+                       "required": False}
+        }
+    },
+    "add_rule": {
+        "name": "add_rule",
+        "description": "添加一条路由规则（DOMAIN/IP-CIDR/GEOIP等），支持指定插入位置，默认在GEOIP之前",
+        "handler": tool_add_rule,
+        "parameters": {
+            "type": {"type": "string",
+                     "description": "规则类型: DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/IP-CIDR/GEOIP/MATCH 等",
+                     "required": True},
+            "match": {"type": "string",
+                      "description": "匹配值：域名/IP段/国家码等",
+                      "required": False},
+            "policy": {"type": "string",
+                       "description": "策略目标: DIRECT/REJECT/代理组名称（如 🌐 国外流量）",
+                       "required": True},
+            "position": {"type": "string",
+                         "description": "插入位置: auto/GEOIP前/first/last/数字下标",
+                         "required": False},
+            "no_resolve": {"type": "boolean",
+                           "description": "IP-CIDR规则是否加 no-resolve（默认 false）",
+                           "required": False},
+            "skip_restart": {"type": "boolean",
+                             "description": "添加后不重启Mihomo（默认 false，会重启）",
+                             "required": False}
+        }
+    },
+    "remove_rule": {
+        "name": "remove_rule",
+        "description": "删除匹配的路由规则。可按规则类型/匹配值/策略目标组合筛选，或按索引删除",
+        "handler": tool_remove_rule,
+        "parameters": {
+            "type": {"type": "string",
+                     "description": "按规则类型筛选删除",
+                     "required": False},
+            "match": {"type": "string",
+                      "description": "按匹配值关键词筛选",
+                      "required": False},
+            "policy": {"type": "string",
+                       "description": "按策略目标筛选（如 DIRECT）",
+                       "required": False},
+            "index": {"type": "number",
+                      "description": "按索引删除（从0开始）",
+                      "required": False},
+            "all": {"type": "boolean",
+                    "description": "是否删除所有匹配的规则（默认只删第一个）",
+                    "required": False},
+            "skip_restart": {"type": "boolean",
+                             "description": "删除后不重启Mihomo",
+                             "required": False}
+        }
+    },
+    "add_direct_rule": {
+        "name": "add_direct_rule",
+        "description": "快捷添加一条直连规则（域名/IP走DIRECT，绕过代理）",
+        "handler": tool_add_direct_rule,
+        "parameters": {
+            "type": {"type": "string",
+                     "description": "规则类型: DOMAIN-SUFFIX/IP-CIDR/等",
+                     "required": True},
+            "match": {"type": "string",
+                      "description": "匹配值：域名/IP段",
+                      "required": True},
+            "position": {"type": "string",
+                         "description": "插入位置",
+                         "required": False},
+            "no_resolve": {"type": "boolean",
+                           "description": "IP-CIDR加 no-resolve",
+                           "required": False}
+        }
+    },
+    "add_proxy_rule": {
+        "name": "add_proxy_rule",
+        "description": "快捷添加一条代理规则（指定域名/IP走代理，默认走 🌐 国外流量 组）",
+        "handler": tool_add_proxy_rule,
+        "parameters": {
+            "type": {"type": "string",
+                     "description": "规则类型: DOMAIN-SUFFIX/IP-CIDR/等",
+                     "required": True},
+            "match": {"type": "string",
+                      "description": "匹配值：域名/IP段",
+                      "required": True},
+            "policy": {"type": "string",
+                       "description": "代理组名称（默认 🌐 国外流量）",
+                       "required": False},
+            "position": {"type": "string",
+                         "description": "插入位置",
+                         "required": False},
+            "no_resolve": {"type": "boolean",
+                           "description": "IP-CIDR加 no-resolve",
+                           "required": False}
+        }
+    },
 }
 
 
@@ -268,7 +437,6 @@ class MCPHandler(BaseHTTPRequestHandler):
             try:
                 while True:
                     self.wfile.write(b": keepalive\n\n")
-                    import time
                     time.sleep(15)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -280,6 +448,12 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self.path == "/mcp/message":
             try:
                 length = int(self.headers.get("Content-Length", 0))
+                if length > MAX_BODY_SIZE:
+                    self._send_json({
+                        "error": {"code": "PAYLOAD_TOO_LARGE",
+                                  "message": f"请求体超过上限 {MAX_BODY_SIZE} 字节"}
+                    }, 413)
+                    return
                 body = json.loads(self.rfile.read(length)) if length else {}
             except Exception:
                 self._send_json({"error": "invalid_json"}, 400)
@@ -334,7 +508,7 @@ class MCPHandler(BaseHTTPRequestHandler):
 
 def run_server(port: int = 9010):
     """启动 MCP HTTP 服务器。"""
-    server = HTTPServer(("0.0.0.0", port), MCPHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), MCPHandler)
     print(f"🚀 Mihomo MCP Server v2.2 启动于端口 {port}")
     print(f"📋 工具数: {len(MCP_TOOLS)}")
     print(f"📡 SSE: http://127.0.0.1:{port}/mcp/sse")

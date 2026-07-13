@@ -5,6 +5,7 @@
 import urllib.request, urllib.parse, urllib.error
 import json
 import time
+import concurrent.futures
 
 from config import R, MIHOMO_API, TEST_URL, TEST_TIMEOUT
 from mihomo_api import (
@@ -58,31 +59,38 @@ def tool_list_nodes(**kwargs) -> dict:
     for gname, ginfo in targets.items():
         all_nodes = ginfo.get("all", [])
         now = ginfo.get("now", "N/A")
+        # 限制节点数：未指定 group 时最多测试 50 个，避免耗时过长
+        nodes_to_test = all_nodes if group else all_nodes[:50]
         nodes_info = []
 
-        for node in all_nodes:
+        def test_one(node):
             encoded = urllib.parse.quote(node, safe='')
             delay_data = safe_api_get(
                 f"/proxies/{encoded}/delay"
                 f"?url={urllib.parse.quote(TEST_URL)}"
                 f"&timeout={TEST_TIMEOUT}",
-                timeout=8
+                timeout=5
             )
             if "_mcp_error" in delay_data:
-                nodes_info.append({
+                return {
                     "name": node, "delay_ms": None,
                     "is_current": node == now,
                     "error": delay_data["_mcp_error"]["error"]["code"],
                     "status": "timeout"
-                })
-            else:
-                delay = delay_data.get("delay")
-                nodes_info.append({
-                    "name": node, "delay_ms": delay,
-                    "is_current": node == now,
-                    "error": None,
-                    "status": "ok" if delay else "no_response"
-                })
+                }
+            delay = delay_data.get("delay")
+            return {
+                "name": node, "delay_ms": delay,
+                "is_current": node == now,
+                "error": None,
+                "status": "ok" if delay else "no_response"
+            }
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(test_one, node): node
+                       for node in nodes_to_test}
+            for future in concurrent.futures.as_completed(futures):
+                nodes_info.append(future.result())
 
         result.append({
             "group_name": gname,
@@ -295,12 +303,27 @@ def tool_batch_test(**kwargs) -> dict:
                 "elapsed": None, "is_current": node == current
             })
 
-    # 恢复原始节点
-    try:
-        encoded = urllib.parse.quote(target_group, safe='')
-        _api_put(f"/proxies/{encoded}", {"name": current})
-    except Exception:
-        pass
+    # 恢复原始节点（重试 3 次，间隔 0.5 秒）
+    restored_original = True
+    for attempt in range(3):
+        try:
+            encoded = urllib.parse.quote(target_group, safe='')
+            _api_put(f"/proxies/{encoded}", {"name": current})
+            break
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5)
+            else:
+                restored_original = False
+
+    msg = (f"共测试 {len(results)} 个节点，"
+           f"{sum(1 for r in results if r['status'] == 'ok')} 个可达"
+           + (f"，最快: {best_node} ({round(best_time, 2)}s)"
+              if best_node else ""))
+    if not restored_original:
+        last_node = all_nodes[-1] if all_nodes else "?"
+        msg += (f" ⚠ 恢复原始节点失败（已重试 3 次），"
+                f"代理组当前可能停留在 '{last_node}'")
 
     return R.ok(
         data={
@@ -312,10 +335,109 @@ def tool_batch_test(**kwargs) -> dict:
             "best_node": best_node,
             "best_time_s": round(best_time, 2)
             if best_node else None,
+            "restored_original": restored_original,
             "details": results
         },
-        message=f"共测试 {len(results)} 个节点，"
-                f"{sum(1 for r in results if r['status'] == 'ok')} 个可达"
-                + (f"，最快: {best_node} ({round(best_time, 2)}s)"
-                   if best_node else "")
+        message=msg
+    )
+
+
+
+def _get_mixed_port() -> int:
+    """从 /etc/mihomo/config.yaml 读取 mixed-port，默认 7890。"""
+    import os
+    try:
+        import yaml
+        config_path = os.environ.get(
+            "MIHOMO_CONFIG", "/etc/mihomo/config.yaml")
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        if not cfg:
+            return 7890
+        port = cfg.get("mixed-port")
+        return int(port) if port else 7890
+    except Exception:
+        return 7890
+
+
+def tool_run_with_node(**kwargs) -> dict:
+    """在指定代理节点下执行命令，不影响系统代理。
+
+    依赖永久规则 PROCESS-NAME,curl/wget,🎯 手动选择 已存在，
+    只需切换 🎯 手动选择 → 执行命令 → 恢复。
+    """
+    import subprocess, os
+
+    command = kwargs.get("command", "")
+    node = kwargs.get("node", "")
+    timeout = kwargs.get("timeout", 30)
+
+    if not command:
+        return R.invalid_param("command", "命令不能为空")
+    if not node:
+        return R.invalid_param("node", "节点名称不能为空")
+
+    manual_group = "🎯 手动选择"
+    groups = get_proxy_groups()
+    if groups is None or "_mcp_error" in groups:
+        return R.api_error("/proxies", "无法获取代理组")
+    if manual_group not in groups:
+        return R.not_found("proxy_group", manual_group, list(groups.keys()))
+    all_manual = groups[manual_group].get("all", [])
+    if node not in all_manual:
+        return R.fail("NODE_NOT_IN_GROUP",
+                       f"节点 '{node}' 不在 '{manual_group}' 中")
+
+    orig_manual = groups[manual_group].get("now", "")
+    start = time.time()
+
+    # 切节点
+    try:
+        _api_put(f"/proxies/{urllib.parse.quote(manual_group, safe='')}",
+                 {"name": node})
+    except Exception as e:
+        return R.api_error("/proxies", f"切换节点失败: {e}")
+
+    time.sleep(1)
+
+    # 执行命令（设代理环境变量确保走 Mihomo）
+    cmd_start = time.time()
+    env = os.environ.copy()
+    port = _get_mixed_port()
+    env["HTTP_PROXY"] = f"http://127.0.0.1:{port}"
+    env["HTTPS_PROXY"] = f"http://127.0.0.1:{port}"
+    env["http_proxy"] = f"http://127.0.0.1:{port}"
+    env["https_proxy"] = f"http://127.0.0.1:{port}"
+    try:
+        result = subprocess.run(command, shell=True,
+            capture_output=True, text=True, timeout=timeout, env=env)
+        cmd_duration = time.time() - cmd_start
+        stdout = (result.stdout or "")[:5000]
+        stderr = (result.stderr or "")[:1000]
+        exit_code = result.returncode
+    except subprocess.TimeoutExpired:
+        stdout, stderr = "", f"超时({timeout}s)"
+        exit_code, cmd_duration = -1, timeout
+    except Exception as e:
+        stdout, stderr = "", f"异常: {e}"
+        exit_code, cmd_duration = -2, time.time() - cmd_start
+
+    # 恢复节点
+    restored = False
+    try:
+        _api_put(f"/proxies/{urllib.parse.quote(manual_group, safe='')}",
+                 {"name": orig_manual})
+        restored = True
+    except Exception:
+        pass
+
+    total = time.time() - start
+    return R.ok(
+        data={
+            "node": node, "command": command, "exit_code": exit_code,
+            "stdout": stdout, "stderr": stderr,
+            "restored": restored,
+            "cmd_time_s": round(cmd_duration, 2), "total_time_s": round(total, 2),
+        },
+        message=f"通过 '{node}' 完成(退出码 {exit_code}, {round(cmd_duration, 1)}s)"
     )

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "mcp-nodes"
+version = "2.2.0"
+description = "MCP Server for Mihomo proxy node management — 代理节点管理、订阅管理、服务控制、内核版本管理"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "星之游" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0",
+]
+keywords = ["mcp", "mihomo", "clash-meta", "proxy", "node-manager"]
+
+[project.urls]
+Homepage = "https://github.com/xingzhiyou/mcp-nodes"
+Source = "https://github.com/xingzhiyou/mcp-nodes"
+
+[project.scripts]
+mcp-nodes = "main:run_server"

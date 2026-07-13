@@ -1,4 +1,4 @@
-# MCP Node Manager
+# Mihomo MCP Server
 
 > 基于 MCP (Model Context Protocol) 的 Mihomo/Clash Meta 代理节点管理服务。  
 > 让 AI 助手能自动管理代理节点、订阅、服务控制与内核版本。

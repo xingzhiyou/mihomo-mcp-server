@@ -335,7 +335,7 @@ class MCPHandler(BaseHTTPRequestHandler):
 def run_server(port: int = 9010):
     """启动 MCP HTTP 服务器。"""
     server = HTTPServer(("0.0.0.0", port), MCPHandler)
-    print(f"🚀 MCP Node Manager v2.2 启动于端口 {port}")
+    print(f"🚀 Mihomo MCP Server v2.2 启动于端口 {port}")
     print(f"📋 工具数: {len(MCP_TOOLS)}")
     print(f"📡 SSE: http://127.0.0.1:{port}/mcp/sse")
     print(f"🩺 Health: http://127.0.0.1:{port}/health")

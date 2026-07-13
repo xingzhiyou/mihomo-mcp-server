@@ -487,7 +487,7 @@ def step7_setup_mcp() -> bool:
 def print_banner():
     print(f"""
 {CYAN}{BOLD}╔══════════════════════════════════════╗
-║   MCP Node Manager — 一键部署     ║
+║   Mihomo MCP Server — 一键部署    ║
 ║   v2.2 • Mihomo + MCP 自动安装    ║
 ╚══════════════════════════════════════╝{RESET}
 """)

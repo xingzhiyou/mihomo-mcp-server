@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Server: Proxy Node Manager v2.2
+Mihomo MCP Server v2.2 — Mihomo 代理节点管理 MCP 服务
 模块化重构版。单文件 → 多模块拆分：
 
   config.py         配置常量与结构化结果工具类
